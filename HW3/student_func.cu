@@ -81,7 +81,7 @@
 #include <stdio.h>
 #define REDUCE(a, b) (make_float2(fmaxf(a.x,b.x),fminf(a.y,b.y)))
 #define READ_AND_MAP(i) (make_float2(data[i],data[i]))
-#define WORKGROUP_SIZE 1024
+#define WORKGROUP_SIZE 256
 /**
  * \brief max_min_global_stage1: Look for the maximum an the minimum of an array. stage1
  *
@@ -280,34 +280,61 @@ void histogram(const float* const lum,
 
 __global__
 void blelloch1( unsigned int* data,
-                int d,
+                int step,
                 int SIZE)
 {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx>=SIZE)
-    return;
-//  __shared__ float s_data[WORKGROUP_SIZE];
-  int scale = pow(2,d+1);
-  if ((idx>scale/2) && ((SIZE-idx) mod scale ==0 )){
-    data[idx] := data[idx] + data[idx - scale/2];
+  if ((idx+step<=SIZE) && (idx % step) == 0 ){
+    data[idx+step-1] += data[idx + step/2 - 1];
   }
 }
 __global__
 void blelloch2( unsigned int* data,
-                int d,
+                int step,
                 int SIZE)
 {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx>=SIZE)
-    return;
-//  __shared__ float s_data[WORKGROUP_SIZE];
-  int scale = pow(2,d+1);
-  if ((idx>scale/2) && ((SIZE-idx) mod scale ==0 )){
-    data[idx] := data[idx] + data[idx - scale/2];
+  if (idx == 0)
+    data[SIZE-1] = data[SIZE/2-1];
+}
+__global__
+void blelloch3( unsigned int* data,
+                int step,
+                int SIZE)
+{
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx == 0)
+    data[SIZE/2-1] = 0;
+}
+
+__global__
+void blelloch4( unsigned int* data,
+                int step,
+                int SIZE)
+{
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if ((idx+step<=SIZE) && ((idx % step) == 0 )){
+    unsigned int  temp = data[idx + step/2 - 1];
+    data[idx + step/2 -1] = data[idx + step - 1];
+    data[idx + step - 1] += temp;
   }
 }
 
 #include "utils.h"
+
+void print_cuda_array(unsigned int* d_data, size_t size){
+  unsigned int *h_data;
+  h_data = (unsigned int *)malloc(sizeof(unsigned int)*size);
+  cudaMemcpy(h_data, d_data, sizeof(unsigned int) * size, cudaMemcpyDeviceToHost);
+  for (int i=0; i<size; i++){
+//    if (i%10==39)
+//      printf("%d\n",h_data[i]);
+//    else
+      printf("%d ",h_data[i]);
+  }
+  printf("\n");
+  free(h_data);
+}
 
 void your_histogram_and_prefixsum(const float* const d_logLuminance,
                                   unsigned int* const d_cdf,
@@ -330,10 +357,10 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   //Malloc stuff:
   float2 *d_data2;
   float *d_min, *d_max;
-  int *d_bins;
+
   checkCudaErrors(cudaMalloc(&d_min, (size_t)  sizeof(float)));
   checkCudaErrors(cudaMalloc(&d_max, (size_t)  sizeof(float)));
-//  checkCudaErrors(cudaMalloc(&d_bins, (size_t)  sizeof(int)*numBins));
+
   //1. get maximum and minimum of logLuminance channel.
   int image_size = numRows*numCols;
   float wg_float = fminf((float) WORKGROUP_SIZE, sqrtf((float)image_size));
@@ -341,7 +368,6 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   int memory = sizeof(float) * 2 * red_size; //temporary storage for reduction
 
   checkCudaErrors(cudaMalloc(&d_data2, (size_t)memory));
-
 
   max_min_stage1<<<red_size, red_size>>>(d_logLuminance, d_data2, image_size);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
@@ -352,33 +378,38 @@ void your_histogram_and_prefixsum(const float* const d_logLuminance,
   cudaMemcpy(mmin, d_min, sizeof(float) * 1, cudaMemcpyDeviceToHost);
   cudaMemcpy(mmax, d_max, sizeof(float) * 1, cudaMemcpyDeviceToHost);
   printf( "CUDA Min: %f Max: %f\n",mmin[0],mmax[0]);
-//  float logLumRange = mmax[0] - mmin[0];
+  min_logLum = mmin[0];
+  max_logLum = mmax[0];
+
 
 //  3) generate a histogram of all the values in the logLuminance channel using
 //         the formula: bin = (lum[i] - lumMin) / lumRange * numBins
   histogram<<<((image_size+31)/32),32>>>(d_logLuminance, d_min, d_max, d_cdf, numBins, image_size);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+  print_cuda_array(d_cdf,numBins);
 //  4) Perform an exclusive scan (prefix sum) on the histogram to get
 //     the cumulative distribution of luminance values (this should go in the
 //     incoming d_cdf pointer which already has been allocated for you)       */
-  int dmax = (int) ceil(log(1.0*numBins)/log(2.0))
-  for (int d= 0, d<dmax-1, d++){
-    blelloch1<<<((numBins+31)/32),32>>>(d_cdf, d, numBins);
+  int dmax = (int) ceil(log(1.0*numBins)/log(2.0));
+  printf( "numBins= %d; dmax=%d \n",numBins,dmax);
+  for (int d=0; d<(dmax-1); d++){
+    printf( "CUDA blelloch1 d= %d/%d (%d)\n",d,dmax,1<<(d+1));
+    blelloch1<<<((numBins+WORKGROUP_SIZE-1)/WORKGROUP_SIZE),WORKGROUP_SIZE>>>(d_cdf, 1<<(d+1), numBins);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
   }
-
-  cudaMemcpy(d_cdf+sizeof(unsigned int)*(numBins-1), d_cdf+sizeof(unsigned int)*(numBins/2-1), sizeof(unsigned int), cudaMemcpyDeviceToDevice);
-  unsigned int h_zero[1];
-  h_zero[0] = 0;
-  cudaMemcpy(d_cdf+sizeof(unsigned int)*(numBins/2-1),h_zero, sizeof(unsigned int), cudaMemcpyHostToDevice);
-
-  for (int d=dmax-2,d>=0, d--){
+  print_cuda_array(d_cdf,numBins);
+  blelloch2<<<1,1>>>(d_cdf, 1, numBins);
+  blelloch3<<<1,1>>>(d_cdf, 1, numBins);
+  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+  for (int d=dmax-2;d>=0; d--){
+    printf( "CUDA blelloch2 d= %d/%d (%d)\n",d,dmax,1<<(d+1));
+    blelloch4<<<((numBins+WORKGROUP_SIZE-1)/WORKGROUP_SIZE),WORKGROUP_SIZE>>>(d_cdf, 1<<(d+1), numBins);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
   }
-     // Free memory
-
-
+  print_cuda_array(d_cdf,numBins);
+  // Free memory
   checkCudaErrors(cudaFree(d_data2));
   checkCudaErrors(cudaFree(d_max));
   checkCudaErrors(cudaFree(d_min));
-//  checkCudaErrors(cudaFree(d_bins));
 
 }
