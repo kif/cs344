@@ -1,8 +1,8 @@
 #include <algorithm>
 #include <cassert>
-
+#include <stdio.h>
 void referenceCalculation(const float* const h_logLuminance, unsigned int* const h_cdf,
-                          const size_t numRows, const size_t numCols, const size_t numBins, 
+                          const size_t numRows, const size_t numCols, const size_t numBins,
 						  float &logLumMin, float &logLumMax)
 {
   logLumMin = h_logLuminance[0];
@@ -14,7 +14,7 @@ void referenceCalculation(const float* const h_logLuminance, unsigned int* const
     logLumMin = std::min(h_logLuminance[i], logLumMin);
     logLumMax = std::max(h_logLuminance[i], logLumMax);
   }
-
+  printf( "Reference: Min: %f Max: %f\n",logLumMin,logLumMax);
   //Step 2
   float logLumRange = logLumMax - logLumMin;
 
