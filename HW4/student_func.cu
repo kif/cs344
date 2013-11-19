@@ -43,27 +43,29 @@
  */
 __global__
 void blelloch1( unsigned int* data,
-                int step,
-                int SIZE)
+				unsigned int step,
+				unsigned int SIZE)
 {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if ((idx+step<=SIZE) && (idx % step) == 0 ){
     data[idx+step-1] += data[idx + step/2 - 1];
   }
 }
+
 __global__
 void blelloch2( unsigned int* data,
-                int step,
-                int SIZE)
+				unsigned int step,
+				unsigned int SIZE)
 {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx == 0)
     data[SIZE-1] = data[SIZE/2-1];
 }
+
 __global__
 void blelloch3( unsigned int* data,
-                int step,
-                int SIZE)
+				unsigned int step,
+				unsigned int SIZE)
 {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if (idx == 0)
@@ -72,8 +74,8 @@ void blelloch3( unsigned int* data,
 
 __global__
 void blelloch4( unsigned int* data,
-                int step,
-                int SIZE)
+				unsigned int step,
+				unsigned int SIZE)
 {
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   if ((idx+step<=SIZE) && ((idx % step) == 0 )){
@@ -83,27 +85,33 @@ void blelloch4( unsigned int* data,
   }
 }
 
-void cumsum(unsigned int *d_array,
-            unsigned int dmax){
-  unsigned int size = 1<<dmax;
-  for (int d=0; d<(dmax-1); d++){
+unsigned int cumsum(unsigned int *d_array,
+           			unsigned int dmax){
 
-//    printf( "CUDA blelloch1 d= %d/%d (%d)\n",d,dmax,1<<(d+1));
-    blelloch1<<<(size/WORKGROUP_SIZE, WORKGROUP_SIZE>>>(d_array, 1<<(d+1), size);
-//    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+	unsigned int size = (1<<dmax),
+		  	  sum=0;
+
+  for (unsigned int d=0; d<(dmax-1); d++){
+    printf( "CUDA blelloch1 d= %d/%d (%d)\n",d,dmax,(1<<(d+1)));
+    blelloch1<<<size/WORKGROUP_SIZE, WORKGROUP_SIZE>>>(d_array, (1<<(d+1)), size);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
   }
 //  print_cuda_array(d_array,size);
+  //One should retrieve the sum of all data here
+
+  cudaMemcpy(&sum, &d_array[size-1], 1 * sizeof(unsigned int), cudaMemcpyDeviceToHost);
+  cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
   blelloch2<<<1,1>>>(d_array, 1, size);
   blelloch3<<<1,1>>>(d_array, 1, size);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
   for (int d=dmax-2;d>=0; d--){
-//    printf( "CUDA blelloch2 d= %d/%d (%d)\n",d,dmax,1<<(d+1));
-    blelloch4<<<(size/WORKGROUP_SIZE),WORKGROUP_SIZE>>>(d_array, 1<<(d+1), size);
-//    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    printf( "CUDA blelloch2 d= %d/%d (%d)\n",d,dmax,1<<(d+1));
+    blelloch4<<<size/WORKGROUP_SIZE,WORKGROUP_SIZE>>>(d_array, 1<<(d+1), size);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 
   }
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
-
+  return sum;
 }
 
 __global__
@@ -124,8 +132,10 @@ void calc_predicate(unsigned int* data,
     }
 
   }
-  else
-    indexes[idx] = 0; //Fill the array with 0 until next power of two
+  else{
+	  index0[idx] = 0;
+	  index1[idx] = 0; //Fill the array with 0 until next power of two
+  }
 }
 
 __global__
@@ -136,10 +146,13 @@ void reorder(unsigned int* inputVals,
              unsigned int* index0,
              unsigned int* index1,
              unsigned int bitPos,
-             unsigned int numElems){
+             unsigned int numElems,
+             unsigned int offset){
   unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x, new_idx;
   if (idx<numElems){
-   unsigned int value = data[idx], offset = index0[numElems-1]; //todo check
+   unsigned int value = inputVals[idx],
+		   	    pos = inputPos[idx];
+//		   	    offset = index0[numElems-1]; //todo check
 
     if (value &(1<<bitPos) ==0){
       new_idx = index0[idx];
@@ -147,8 +160,8 @@ void reorder(unsigned int* inputVals,
     else{
       new_idx = offset + index1[idx];
     }
-    outputVals[new_idx] = inputVals[idx];
-    oututPos[new_idx] = inputPos[idx];
+    outputVals[new_idx] = value;
+    oututPos[new_idx] = pos;
   }
 }
 
@@ -159,8 +172,11 @@ void your_sort(unsigned int* const d_inputVals,
                unsigned int* const d_outputPos,
                const size_t numElems)
 {
-  unsigned int dmax = ((int)ceil(log((double)numElems)/log(2.0)));
-  unsigned int padded_size = 1<<dmax;
+  unsigned int dmax = ((int)ceil(log((double)numElems)/log(2.0))),
+		  	   padded_size = 1<<dmax,
+		  	   sum0 = 0,
+		  	   sum1 = 0;
+
   printf("Size of the system: %d padded to %d",numElems, padded_size);
   //Malloc stuff
   unsigned int *d_index0,*d_index1;
@@ -168,11 +184,18 @@ void your_sort(unsigned int* const d_inputVals,
   checkCudaErrors(cudaMalloc(&d_index1, (size_t)  padded_size*sizeof(unsigned int)));
 
   // do some work
-  for (int i=0;i<32;i++){
-    calc_predicate(d_inputVals,d_index0,d_index1,i,numElems);
-
+  for (int i=0;i<1;i++){
+    calc_predicate<<<padded_size/WORKGROUP_SIZE,WORKGROUP_SIZE>>>(d_inputVals,d_index0,d_index1,i,numElems);
+    cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
+    sum0 = cumsum(d_index0,dmax);
+    if ((sum0==0)||(sum0==numElems))
+    	continue;
+    printf("Found %d items at zero for bit #%d",sum0,i);
+    sum1 = cumsum(d_index1,dmax);
+    printf("Found %d items at one  for bit #%d",sum1,i);
+    reorder<<<padded_size/WORKGROUP_SIZE,WORKGROUP_SIZE>>>(d_inputVals, d_inputPos, d_outputVals, d_outputPos,
+    		d_index0, d_index1, i, numElems, sum0);
   }
-
   //Free stuff
   checkCudaErrors(cudaFree(d_index0));
   checkCudaErrors(cudaFree(d_index1));
