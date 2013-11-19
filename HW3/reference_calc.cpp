@@ -1,6 +1,14 @@
 #include <algorithm>
 #include <cassert>
 #include <stdio.h>
+
+void print_array(unsigned int* data, int size){
+  for (int i=0; i<size; i++){
+      printf("%d ",data[i]);
+  }
+  printf("\n");
+}
+
 void referenceCalculation(const float* const h_logLuminance, unsigned int* const h_cdf,
                           const size_t numRows, const size_t numCols, const size_t numBins,
 						  float &logLumMin, float &logLumMax)
@@ -39,5 +47,6 @@ void referenceCalculation(const float* const h_logLuminance, unsigned int* const
     h_cdf[i] = h_cdf[i - 1] + histo[i - 1];
   }
 
+  print_array(h_cdf,numBins);
   delete[] histo;
 }
