@@ -119,6 +119,39 @@ void atomicHisto(const unsigned int* const vals, //INPUT
   atomicAdd(&histo[value],1);
 }
 
+
+void pseudoLocalAtomicHisto(const unsigned int* const vals, //INPUT
+               unsigned int* const histo,      //OUPUT
+               int numVals)
+{	// WG size = 32 treat, each thread treat 32 vals
+	  __shared__ unsigned int hist[1024];
+	  for (unsigned int i=0;i<1024;i+=blockDim.x){
+		  lhist[i] = 0;
+	  }
+	  __syncthreads();
+//	  for (unsigned char i=0;i<1024;i=blockDim.x){
+	  // do this until update is not overwritten:
+	  for (unsigned char i=0;i<32;i+=1){
+		  unsigned int idx = blockIdx.x * blockDim.x * (32+i) + threadIdx.x;
+		  unsigned int bin = vals[idx];
+		  do {
+			  unsigned int myVal = lhist[bin] & 0x7FFFFFF; // read the current bin val
+			  myVal = ((threadIdx.x & 0x1F) << 27) | (myVal + 1); // tag my updated val
+			  lhist[bin] = myVal; // attempt to write the bin
+		  } while (lhist[bin] != myVal); // while update overwritten
+	  }
+	  __syncthreads();
+	  //Central atomic add
+	  for (unsigned int i=0; i<1024; i+=blockDim.x){
+		  unsigned int pos = i+threadIdx.x;
+		  unsigned int val = lhist[pos];
+		  if (val)
+			  atomicAdd(&histo[pos], val);
+	  }
+}
+
+
+
 void computeHistogram(const unsigned int* const d_vals, //INPUT
                       unsigned int* const d_histo,      //OUTPUT
                       const unsigned int numBins,
@@ -126,10 +159,10 @@ void computeHistogram(const unsigned int* const d_vals, //INPUT
 {
   //TODO Launch the yourHisto kernel
   printf("OK we are working on an input array of %d element and histogramming into %d bins\n",numElems,numBins);
-  int BLOCK_SIZE=8;
-  int PROC_PER_BLOCK=2048;
+  int BLOCK_SIZE=32;
+  int PROC_PER_BLOCK=32*32;
   dim3 num_blocks((numElems+PROC_PER_BLOCK-1)/PROC_PER_BLOCK);
   dim3 block_size(BLOCK_SIZE);
-  yourHisto<<<num_blocks,block_size>>>(d_vals, d_histo, numElems);
+  pseudoLocalAtomicHisto<<<num_blocks,block_size>>>(d_vals, d_histo, numElems);
   cudaDeviceSynchronize(); checkCudaErrors(cudaGetLastError());
 }
